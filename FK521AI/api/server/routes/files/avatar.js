@@ -11,12 +11,15 @@ const router = express.Router();
 router.post('/', async (req, res) => {
   try {
     const appConfig = req.config;
+    if (!appConfig) {
+      return res.status(500).json({ message: 'App config missing for avatar upload' });
+    }
     if (!req.file?.path) {
       return res.status(400).json({ message: 'No avatar file uploaded' });
     }
     filterFile({ req, file: req.file, image: true, isAvatar: true });
     const userId = req.user?.id;
-    const { manual } = req.body;
+    const manual = req.body?.manual === true || req.body?.manual === 'true';
     const input = await fs.readFile(req.file.path);
 
     if (!userId) {

@@ -81,6 +81,9 @@ function normalizeRoleName(rawRoleName) {
  */
 const createPermissionUpdateHandler = (permissionKey) => {
   const config = permissionConfigs[permissionKey];
+  if (!config) {
+    throw new Error(`Unknown permission key: ${permissionKey}`);
+  }
 
   return async (req, res) => {
     const roleName = normalizeRoleName(req.params.roleName);
@@ -90,7 +93,13 @@ const createPermissionUpdateHandler = (permissionKey) => {
     }
 
     try {
+      if (!updates || typeof updates !== 'object' || Array.isArray(updates)) {
+        return res.status(400).send({ message: 'Invalid request body' });
+      }
       const parsedUpdates = config.schema.partial().parse(updates);
+      if (Object.keys(parsedUpdates || {}).length === 0) {
+        return res.status(400).send({ message: 'No permission updates provided' });
+      }
 
       const role = await getRoleByName(roleName);
       if (!role) {

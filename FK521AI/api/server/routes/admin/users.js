@@ -25,6 +25,8 @@ const handlers = createAdminUsersHandlers({
 });
 
 const USER_FIELDS = '_id name username email avatar role provider emailVerified createdAt updatedAt';
+const USERNAME_PATTERN = /^[a-zA-Z0-9._-]{3,64}$/;
+const NAME_MAX_LENGTH = 80;
 
 function isAdminUser(user) {
   return String(user?.role || '').trim().toUpperCase() === SystemRoles.ADMIN;
@@ -55,6 +57,10 @@ function normalizeRole(role) {
   const normalized = String(role || '').trim().toUpperCase();
   return normalized === SystemRoles.ADMIN ? SystemRoles.ADMIN : SystemRoles.USER;
 }
+function isValidRole(role) {
+  const normalized = String(role || '').trim().toUpperCase();
+  return normalized === SystemRoles.ADMIN || normalized === SystemRoles.USER;
+}
 
 function normalizeEmail(email) {
   return String(email || '').trim().toLowerCase();
@@ -67,6 +73,12 @@ function isValidEmail(email) {
 function normalizeName(name, fallback) {
   const value = String(name || '').trim();
   return value || fallback;
+}
+function isValidDisplayName(value) {
+  return typeof value === 'string' && value.trim().length > 0 && value.trim().length <= NAME_MAX_LENGTH;
+}
+function isValidUsername(value) {
+  return typeof value === 'string' && USERNAME_PATTERN.test(value.trim());
 }
 
 function isValidUserId(id) {
@@ -83,13 +95,34 @@ async function runAdminHandler(req, res, next, handler, fallbackMessage) {
 
 router.use(requireJwtAuth, checkAdminAccess);
 
-router.get('/', checkReadUsers, (req, res, next) => runAdminHandler(req, res, next, handlers.listUsers, '读取用户列表失败'));
-router.get('/search', checkReadUsers, (req, res, next) => runAdminHandler(req, res, next, handlers.searchUsers, '搜索用户失败'));
+function validateListQuery(req, res, next) {
+  const pageSizeRaw = req.query?.pageSize ?? req.query?.limit ?? req.query?.perPage;
+  if (pageSizeRaw !== undefined) {
+    const pageSize = Number.parseInt(String(pageSizeRaw), 10);
+    if (!Number.isFinite(pageSize) || pageSize < 1 || pageSize > 100) {
+      return respondWithStandardError(res, 400, {
+        message: '分页大小必须在 1-100 之间',
+        error_code: 'INVALID_PAGE_SIZE',
+      });
+    }
+  }
+  next();
+}
+
+router.get('/', checkReadUsers, validateListQuery, (req, res, next) =>
+  runAdminHandler(req, res, next, handlers.listUsers, '读取用户列表失败'),
+);
+router.get('/search', checkReadUsers, validateListQuery, (req, res, next) =>
+  runAdminHandler(req, res, next, handlers.searchUsers, '搜索用户失败'),
+);
 
 router.post('/', checkManageUsers, async (req, res) => {
   try {
     const email = normalizeEmail(req.body?.email);
     const password = String(req.body?.password || '');
+    if (req.body?.role !== undefined && !isValidRole(req.body?.role)) {
+      return respondWithStandardError(res, 400, { message: '角色无效，仅支持 ADMIN 或 USER', error_code: 'INVALID_ROLE' });
+    }
     const role = normalizeRole(req.body?.role);
     const username = normalizeName(req.body?.username, email.split('@')[0] || `user_${Date.now()}`);
     const name = normalizeName(req.body?.name, username);
@@ -103,6 +136,18 @@ router.post('/', checkManageUsers, async (req, res) => {
 
     if (!password || password.length < 6) {
       return respondWithStandardError(res, 400, { message: '密码至少需要 6 位', error_code: 'INVALID_PASSWORD' });
+    }
+    if (!isValidUsername(username)) {
+      return respondWithStandardError(res, 400, {
+        message: '用户名格式无效（3-64位，仅支持字母、数字、点、下划线、短横线）',
+        error_code: 'INVALID_USERNAME',
+      });
+    }
+    if (!isValidDisplayName(name)) {
+      return respondWithStandardError(res, 400, {
+        message: `昵称长度必须在 1-${NAME_MAX_LENGTH} 之间`,
+        error_code: 'INVALID_NAME',
+      });
     }
 
     const existingUser = await db.findUser({ email }, '_id');
@@ -162,6 +207,9 @@ router.patch('/:id', checkManageUsers, async (req, res) => {
     }
 
     const nextRole = req.body?.role !== undefined ? normalizeRole(req.body.role) : undefined;
+    if (req.body?.role !== undefined && !isValidRole(req.body.role)) {
+      return respondWithStandardError(res, 400, { message: '角色无效，仅支持 ADMIN 或 USER', error_code: 'INVALID_ROLE' });
+    }
     if (String(req.user?.id) === id && nextRole === SystemRoles.USER) {
       return respondWithStandardError(res, 400, {
         message: '不能在当前会话中降级自己的管理员权限',
@@ -191,10 +239,24 @@ router.patch('/:id', checkManageUsers, async (req, res) => {
 
     const update = {};
     if (req.body?.name !== undefined) {
-      update.name = normalizeName(req.body.name, targetUser.name || targetUser.username || '用户');
+      const normalizedName = normalizeName(req.body.name, targetUser.name || targetUser.username || '用户');
+      if (!isValidDisplayName(normalizedName)) {
+        return respondWithStandardError(res, 400, {
+          message: `昵称长度必须在 1-${NAME_MAX_LENGTH} 之间`,
+          error_code: 'INVALID_NAME',
+        });
+      }
+      update.name = normalizedName;
     }
     if (req.body?.username !== undefined) {
-      update.username = normalizeName(req.body.username, targetUser.username || targetUser.email);
+      const normalizedUsername = normalizeName(req.body.username, targetUser.username || targetUser.email);
+      if (!isValidUsername(normalizedUsername)) {
+        return respondWithStandardError(res, 400, {
+          message: '用户名格式无效（3-64位，仅支持字母、数字、点、下划线、短横线）',
+          error_code: 'INVALID_USERNAME',
+        });
+      }
+      update.username = normalizedUsername;
     }
     if (nextEmail !== undefined) {
       update.email = nextEmail;
@@ -271,7 +333,22 @@ router.delete('/:id', checkManageUsers, (req, res, next) => {
     });
   }
 
-  return runAdminHandler(req, res, next, handlers.deleteUser, '删除用户失败');
+  return runAdminHandler(req, res, next, async (_req, _res, _next) => {
+    const [targetUser] = await db.findUsers({ _id: req.params.id }, '_id role', { limit: 1 });
+    if (!targetUser) {
+      return respondWithStandardError(res, 404, { message: '用户不存在', error_code: 'USER_NOT_FOUND' });
+    }
+    if (String(targetUser.role || '').toUpperCase() === SystemRoles.ADMIN) {
+      const adminCount = await db.countUsers({ role: SystemRoles.ADMIN });
+      if (adminCount <= 1) {
+        return respondWithStandardError(res, 400, {
+          message: '不能删除最后一个管理员账号',
+          error_code: 'LAST_ADMIN_PROTECTED',
+        });
+      }
+    }
+    return handlers.deleteUser(_req, _res, _next);
+  }, '删除用户失败');
 });
 
 module.exports = router;
